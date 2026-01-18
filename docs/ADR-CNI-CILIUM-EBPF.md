@@ -2,7 +2,7 @@
 
 **Status:** Accepted
 **Date:** 2024-03-01
-**Updated:** 2026-01-16
+**Updated:** 2026-01-17
 
 ## Context
 
@@ -10,7 +10,7 @@ Need a CNI for Kubernetes networking. K3s default (Flannel) lacks advanced featu
 
 ## Decision
 
-Use **Cilium** with eBPF as the CNI, replacing Flannel and kube-proxy.
+Use **Cilium** with eBPF as the CNI, replacing Flannel and kube-proxy. Cilium also provides **service mesh capabilities**, eliminating the need for a separate service mesh (Istio).
 
 ## Architecture
 
@@ -20,6 +20,7 @@ flowchart TB
         subgraph Cilium["Cilium"]
             Agent[Cilium Agent]
             eBPF[eBPF Programs]
+            Envoy[Envoy L7 Proxy]
             Hubble[Hubble]
         end
 
@@ -33,16 +34,21 @@ flowchart TB
             NP[Network Policies]
             LB[L2 LoadBalancer]
             Proxy[kube-proxy replacement]
+            mTLS[Transparent mTLS]
+            GW[Gateway API]
         end
     end
 
     Agent --> eBPF
+    Agent --> Envoy
     eBPF --> Pod1
     eBPF --> Pod2
     eBPF --> Pod3
     Agent --> NP
     Agent --> LB
     Agent --> Proxy
+    Agent --> mTLS
+    Agent --> GW
     Agent --> Hubble
 ```
 
@@ -55,8 +61,9 @@ flowchart TB
 | Observability | No | Yes (Hubble) |
 | kube-proxy replacement | No | Yes |
 | eBPF performance | No | Yes |
-| Service mesh integration | No | Yes |
+| Service mesh | No | Yes (built-in) |
 | L2 LoadBalancer | No | Yes |
+| Gateway API | No | Yes |
 
 **Key Decision Factors:**
 - Native L3-L7 network policies
@@ -64,6 +71,7 @@ flowchart TB
 - eBPF for better performance
 - Replaces kube-proxy
 - L2 LoadBalancer for bare-metal
+- Built-in service mesh (no separate Istio needed)
 
 ## Configuration
 
@@ -81,6 +89,19 @@ hubble:
   ui:
     enabled: true
 
+# Gateway API
+gatewayAPI:
+  enabled: true
+
+# Service Mesh
+encryption:
+  enabled: true
+  type: wireguard  # or ipsec
+
+# L7 proxy for advanced traffic management
+envoy:
+  enabled: true
+
 # L2 LoadBalancer (optional)
 l2announcements:
   enabled: true
@@ -93,7 +114,25 @@ l2announcements:
 | kubeProxyReplacement | Replace kube-proxy with eBPF |
 | hubble | Network observability |
 | hubble.relay | Metrics export to Grafana |
+| gatewayAPI | Gateway API for ingress |
+| encryption | WireGuard-based mTLS |
+| envoy | L7 traffic management |
 | l2announcements | L2 LoadBalancer for bare-metal |
+
+## Service Mesh Capabilities
+
+Cilium provides full service mesh functionality:
+
+| Capability | How Cilium Provides It |
+|------------|------------------------|
+| mTLS | WireGuard encryption (transparent) |
+| L7 Policies | CiliumEnvoyConfig + Network Policies |
+| Traffic Management | Gateway API (HTTPRoute, GRPCRoute) |
+| Observability | Hubble metrics, flows, traces |
+| Circuit Breaker | CiliumEnvoyConfig outlier detection |
+| Retries | HTTPRoute retry policies |
+
+See [ADR-CILIUM-SERVICE-MESH](./ADR-CILIUM-SERVICE-MESH.md) for full service mesh details.
 
 ## LoadBalancer Options
 
@@ -102,7 +141,7 @@ flowchart TB
     subgraph Options["LoadBalancer Options"]
         subgraph CloudLB["Cloud LB (Recommended)"]
             HetznerLB[Hetzner LB]
-            AWSLB[AWS ALB/NLB]
+            OCILB[OCI LB]
         end
 
         subgraph K8gbLB["k8gb DNS-based (Free)"]
@@ -126,17 +165,43 @@ flowchart TB
 | k8gb DNS-based | Free | Native | Cost-sensitive |
 | Cilium L2 | Free | No | Single subnet/dev |
 
-## Istio Integration
+## Gateway API Integration
 
-Cilium and Istio work together:
-- Cilium: L3/L4 network policies, kube-proxy replacement
-- Istio: L7 service mesh, mTLS, traffic management
+Cilium replaces traditional ingress controllers with Gateway API:
 
-```mermaid
-flowchart LR
-    Traffic[Traffic] --> Cilium[Cilium L3/L4]
-    Cilium --> Istio[Istio L7]
-    Istio --> Pod[Pod]
+```yaml
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: cilium-gateway
+spec:
+  gatewayClassName: cilium
+  listeners:
+    - name: https
+      port: 443
+      protocol: HTTPS
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - name: tls-secret
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: app-route
+spec:
+  parentRefs:
+    - name: cilium-gateway
+  hostnames:
+    - "app.example.com"
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: app-service
+          port: 80
 ```
 
 ## Consequences
@@ -147,6 +212,8 @@ flowchart LR
 - eBPF performance
 - kube-proxy replacement
 - L2 LoadBalancer option
+- Built-in service mesh (no separate mesh needed)
+- Unified networking and mesh
 
 **Negative:**
 - More complex than Flannel
@@ -154,5 +221,6 @@ flowchart LR
 
 ## Related
 
-- [ADR-ISTIO-SERVICE-MESH](../../istio/docs/ADR-ISTIO-SERVICE-MESH.md)
+- [ADR-CILIUM-SERVICE-MESH](./ADR-CILIUM-SERVICE-MESH.md)
 - [ADR-K8GB-GSLB](../../k8gb/docs/ADR-K8GB-GSLB.md)
+- [SPEC-PLATFORM-TECH-STACK](../../handbook/docs/specs/SPEC-PLATFORM-TECH-STACK.md)
